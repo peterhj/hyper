@@ -12,6 +12,7 @@ authors = ["Sean McArthur <sean.monstar@gmail.com>",
 keywords = ["http", "hyper", "hyperium"]
 
 [dependencies]
+byteorder = "0.3.13"
 httparse = "0.1"
 language-tags = "0.0.7"
 log = "0.3"

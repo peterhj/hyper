@@ -4,6 +4,8 @@
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 #![cfg_attr(feature = "timeouts", feature(socket_timeout))]
 
+#![feature(lookup_host)]
+
 //! # Hyper
 //!
 //! Hyper is a fast, modern HTTP implementation written in and for Rust. It
@@ -143,6 +145,7 @@ extern crate num_cpus;
 extern crate traitobject;
 extern crate typeable;
 extern crate solicit;
+extern crate byteorder;
 
 #[macro_use]
 extern crate language_tags;

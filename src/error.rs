@@ -5,6 +5,7 @@ use std::io::Error as IoError;
 use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 
+use byteorder;
 use httparse;
 use url;
 use solicit::http::HttpError as Http2Error;
@@ -151,6 +152,15 @@ impl From<httparse::Error> for Error {
 impl From<Http2Error> for Error {
     fn from(err: Http2Error) -> Error {
         Error::Http2(err)
+    }
+}
+
+impl From<byteorder::Error> for Error {
+    fn from(err: byteorder::Error) -> Error {
+        match err {
+            //Error::Io(From::from(err
+            _ => unimplemented!(),
+        }
     }
 }
 

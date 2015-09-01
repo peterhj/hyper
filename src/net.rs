@@ -2,8 +2,9 @@
 use std::any::{Any, TypeId};
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{SocketAddr, ToSocketAddrs, TcpStream, TcpListener, Shutdown};
+use std::marker::{PhantomData};
 use std::mem;
+use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs, TcpStream, TcpListener, Shutdown, lookup_host};
 
 #[cfg(feature = "openssl")]
 pub use self::openssl::Openssl;
@@ -11,6 +12,9 @@ pub use self::openssl::Openssl;
 #[cfg(feature = "timeouts")]
 use std::time::Duration;
 
+use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian};
+
+use error::{Error};
 use typeable::Typeable;
 use traitobject;
 
@@ -541,7 +545,6 @@ impl<S: Ssl> NetworkConnector for HttpsConnector<S> {
     }
 }
 
-
 #[cfg(not(feature = "openssl"))]
 #[doc(hidden)]
 pub type DefaultConnector = HttpConnector;
@@ -549,6 +552,230 @@ pub type DefaultConnector = HttpConnector;
 #[cfg(feature = "openssl")]
 #[doc(hidden)]
 pub type DefaultConnector = HttpsConnector<self::openssl::Openssl>;
+
+pub trait Proxy {}
+
+pub struct SocksV4;
+pub struct SocksV5;
+
+impl Proxy for SocksV4 {}
+impl Proxy for SocksV5 {}
+
+fn create_socks4_tcp_stream(proxy_addr: SocketAddr, host: &str, port: u16) -> ::Result<TcpStream> {
+    let addrs: Vec<SocketAddrV4> = try!(lookup_host(host))
+        .filter_map(|maybe_addr| maybe_addr.ok())
+        .filter_map(|addr| if let SocketAddr::V4(v4) = addr { Some(v4) } else { None })
+        .collect();
+    let addr = match addrs.len() {
+        0 => return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid host"))),
+        _ => addrs[0],
+    };
+    let ip_addr = addr.ip().octets();
+
+    let mut stream = try!(TcpStream::connect(proxy_addr));
+
+    // Send protocol version (4).
+    try!(stream.write_u8(4));
+    // Send command code (1).
+    try!(stream.write_u8(1));
+    // Send destination port.
+    try!(stream.write_u16::<BigEndian>(port));
+    // Send destination IP.
+    try!(stream.write(&ip_addr));
+    // TODO: send userid.
+    // Send nil byte.
+    try!(stream.write_u8(0));
+    //try!(stream.flush());
+
+    let reply_version = try!(stream.read_u8());
+    let reply_code = try!(stream.read_u8());
+    let _ = try!(stream.read_u16::<BigEndian>());
+    let _ = try!(stream.read_u32::<BigEndian>());
+    if reply_version != 0 {
+        return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid response version")));
+    }
+    if reply_code != 90 {
+        return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid response code")));
+    }
+
+    Ok(stream)
+}
+
+fn create_socks5_tcp_stream(proxy_addr: SocketAddr, host: &str, port: u16) -> ::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = try!(lookup_host(host))
+        .filter_map(|maybe_addr| maybe_addr.ok())
+        .collect();
+    let addr = match addrs.len() {
+        0 => return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid host"))),
+        _ => addrs[0],
+    };
+    //let ip_addr = addr.ip().octets();
+
+    let mut stream = try!(TcpStream::connect(proxy_addr));
+
+    // Send initial version/method identification message.
+    try!(stream.write_u8(5));
+    try!(stream.write_u8(1));
+    try!(stream.write_u8(0));
+
+    // Receive server reply.
+    let _ = try!(stream.read_u8());
+    let server_method = try!(stream.read_u8());
+    if server_method != 0 {
+        return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid SOCKSv5 authentication method")));
+    }
+
+    // TODO: do auth method stuff.
+
+    // Send SOCKS request.
+    try!(stream.write_u8(5));
+    try!(stream.write_u8(1));
+    try!(stream.write_u8(0));
+    match addr {
+      SocketAddr::V4(v4) => {
+        try!(stream.write_u8(1));
+        try!(stream.write(&v4.ip().octets()));
+      }
+      SocketAddr::V6(v6) => {
+        try!(stream.write_u8(4));
+        let segments = &v6.ip().segments();
+        assert_eq!(8, segments.len());
+        for &segment in segments {
+          try!(stream.write_u16::<BigEndian>(segment));
+        }
+      }
+    }
+    try!(stream.write_u16::<BigEndian>(port));
+
+    // Receive server reply.
+    let _ = try!(stream.read_u8());
+    let server_reply = try!(stream.read_u8());
+    match server_reply {
+      0 => {}
+      _ => unimplemented!(), // TODO
+    }
+    let _ = try!(stream.read_u8());
+    let server_addr_ty = try!(stream.read_u8());
+    match server_addr_ty {
+      1 => {
+        // TODO
+        let _ = try!(stream.read_u32::<BigEndian>());
+      }
+      3 => {} // TODO
+      4 => {
+        // TODO
+        for _ in (0 .. 8) {
+          let _ = try!(stream.read_u16::<BigEndian>());
+        }
+      }
+      _ => unimplemented!(), // TODO
+    }
+    let _ = try!(stream.read_u16::<BigEndian>());
+
+    Ok(stream)
+}
+
+pub struct ProxyHttpConnector<P: Proxy> {
+    proxy_addr: SocketAddr,
+    _marker: PhantomData<P>,
+}
+
+impl<P> ProxyHttpConnector<P> where P: Proxy {
+    pub fn new(proxy_addr: SocketAddr) -> ProxyHttpConnector<P> {
+        ProxyHttpConnector{
+            proxy_addr: proxy_addr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl NetworkConnector for ProxyHttpConnector<SocksV4> {
+    type Stream = HttpStream;
+
+    fn connect(&self, host: &str, port: u16, scheme: &str) -> ::Result<Self::Stream> {
+        match scheme {
+            "http" => {
+                debug!("http scheme, socks4 proxy");
+                Ok(HttpStream(try!(create_socks4_tcp_stream(self.proxy_addr, host, port))))
+            },
+            _ => {
+                Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid scheme for Http")))
+            }
+        }
+    }
+}
+
+impl NetworkConnector for ProxyHttpConnector<SocksV5> {
+    type Stream = HttpStream;
+
+    fn connect(&self, host: &str, port: u16, scheme: &str) -> ::Result<Self::Stream> {
+        match scheme {
+            "http" => {
+                debug!("http scheme, socks5 proxy");
+                Ok(HttpStream(try!(create_socks5_tcp_stream(self.proxy_addr, host, port))))
+            },
+            _ => {
+                Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid scheme for Http")))
+            }
+        }
+    }
+}
+
+pub struct ProxyHttpsConnector<S: Ssl, P: Proxy> {
+    ssl: S,
+    proxy_addr: SocketAddr,
+    _marker: PhantomData<P>,
+}
+
+impl<S, P> ProxyHttpsConnector<S, P> where S: Ssl, P: Proxy {
+    pub fn with_ssl(ssl: S, proxy_addr: SocketAddr) -> ProxyHttpsConnector<S, P> {
+        ProxyHttpsConnector{
+            ssl: ssl,
+            proxy_addr: proxy_addr,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<S, P> ProxyHttpsConnector<S, P> where S: Ssl + Default, P: Proxy {
+    pub fn new(proxy_addr: SocketAddr) -> ProxyHttpsConnector<S, P> {
+        ProxyHttpsConnector::with_ssl(Default::default(), proxy_addr)
+    }
+}
+
+impl<S> NetworkConnector for ProxyHttpsConnector<S, SocksV4> where S: Ssl {
+    type Stream = HttpsStream<S::Stream>;
+
+    fn connect(&self, host: &str, port: u16, scheme: &str) -> ::Result<Self::Stream> {
+        if scheme == "https" {
+            debug!("https scheme, socks4 proxy");
+            let stream = HttpStream(try!(create_socks4_tcp_stream(self.proxy_addr, host, port)));
+            self.ssl.wrap_client(stream, host).map(HttpsStream::Https)
+        } else {
+            ProxyHttpConnector::<SocksV4>::new(self.proxy_addr).connect(host, port, scheme).map(HttpsStream::Http)
+        }
+    }
+}
+
+impl<S> NetworkConnector for ProxyHttpsConnector<S, SocksV5> where S: Ssl {
+    type Stream = HttpsStream<S::Stream>;
+
+    fn connect(&self, host: &str, port: u16, scheme: &str) -> ::Result<Self::Stream> {
+        if scheme == "https" {
+            debug!("https scheme, socks5 proxy");
+            let stream = HttpStream(try!(create_socks5_tcp_stream(self.proxy_addr, host, port)));
+            self.ssl.wrap_client(stream, host).map(HttpsStream::Https)
+        } else {
+            ProxyHttpConnector::<SocksV5>::new(self.proxy_addr).connect(host, port, scheme).map(HttpsStream::Http)
+        }
+    }
+}
+
+#[cfg(not(feature = "openssl"))]
+pub type ProxyConnector<P> = ProxyHttpConnector<P>;
+
+#[cfg(feature = "openssl")]
+pub type ProxyConnector<P> = ProxyHttpsConnector<self::openssl::Openssl, P>;
 
 #[cfg(feature = "openssl")]
 mod openssl {

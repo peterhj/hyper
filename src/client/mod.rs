@@ -58,6 +58,7 @@
 use std::default::Default;
 use std::io::{self, copy, Read};
 use std::iter::Extend;
+use std::net::{SocketAddr};
 
 #[cfg(feature = "timeouts")]
 use std::time::Duration;
@@ -68,7 +69,7 @@ use url::ParseError as UrlError;
 use header::{Headers, Header, HeaderFormat};
 use header::{ContentLength, Location};
 use method::Method;
-use net::{NetworkConnector, NetworkStream, Fresh};
+use net::{NetworkConnector, NetworkStream, Fresh, SocksV4, SocksV5, ProxyConnector};
 use {Url};
 use Error;
 
@@ -100,6 +101,16 @@ impl Client {
     /// Create a new Client.
     pub fn new() -> Client {
         Client::with_pool_config(Default::default())
+    }
+
+    /// Create a new Client with a SOCKSv4 proxy.
+    pub fn with_socks4_proxy(proxy_addr: SocketAddr) -> Client {
+        Client::with_connector(Pool::with_connector(Default::default(), ProxyConnector::<SocksV4>::new(proxy_addr)))
+    }
+
+    /// Create a new Client with a SOCKSv5 proxy.
+    pub fn with_socks5_proxy(proxy_addr: SocketAddr) -> Client {
+        Client::with_connector(Pool::with_connector(Default::default(), ProxyConnector::<SocksV5>::new(proxy_addr)))
     }
 
     /// Create a new Client with a configured Pool Config.
