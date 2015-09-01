@@ -2,6 +2,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::Error as IoError;
+use std::io::ErrorKind as IoErrorKind;
 use std::str::Utf8Error;
 use std::string::FromUtf8Error;
 
@@ -158,8 +159,8 @@ impl From<Http2Error> for Error {
 impl From<byteorder::Error> for Error {
     fn from(err: byteorder::Error) -> Error {
         match err {
-            //Error::Io(From::from(err
-            _ => unimplemented!(),
+            byteorder::Error::Io(e) => Error::Io(e),
+            byteorder::Error::UnexpectedEOF => Error::Io(IoError::new(IoErrorKind::InvalidInput, "Unexpected EOF")),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! A collection of traits abstracting over Listeners and Streams.
 use std::any::{Any, TypeId};
 use std::fmt;
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write, Cursor};
 use std::marker::{PhantomData};
 use std::mem;
 use std::net::{SocketAddr, SocketAddrV4, ToSocketAddrs, TcpStream, TcpListener, Shutdown, lookup_host};
@@ -574,18 +574,24 @@ fn create_socks4_tcp_stream(proxy_addr: SocketAddr, host: &str, port: u16) -> ::
 
     let mut stream = try!(TcpStream::connect(proxy_addr));
 
-    // Send protocol version (4).
-    try!(stream.write_u8(4));
-    // Send command code (1).
-    try!(stream.write_u8(1));
-    // Send destination port.
-    try!(stream.write_u16::<BigEndian>(port));
-    // Send destination IP.
-    try!(stream.write(&ip_addr));
-    // TODO: send userid.
-    // Send nil byte.
-    try!(stream.write_u8(0));
-    //try!(stream.flush());
+    {
+      let mut cursor = Cursor::new(Vec::new());
+
+      // Send protocol version (4).
+      try!(cursor.write_u8(4));
+      // Send command code (1).
+      try!(cursor.write_u8(1));
+      // Send destination port.
+      try!(cursor.write_u16::<BigEndian>(port));
+      // Send destination IP.
+      try!(cursor.write(&ip_addr));
+      // TODO: send userid.
+      // Send nil byte.
+      try!(cursor.write_u8(0));
+
+      try!(stream.write_all(cursor.get_ref()));
+      //try!(stream.flush());
+    }
 
     let reply_version = try!(stream.read_u8());
     let reply_code = try!(stream.read_u8());
@@ -609,14 +615,19 @@ fn create_socks5_tcp_stream(proxy_addr: SocketAddr, host: &str, port: u16) -> ::
         0 => return Err(Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "Invalid host"))),
         _ => addrs[0],
     };
-    //let ip_addr = addr.ip().octets();
 
     let mut stream = try!(TcpStream::connect(proxy_addr));
 
     // Send initial version/method identification message.
-    try!(stream.write_u8(5));
-    try!(stream.write_u8(1));
-    try!(stream.write_u8(0));
+    {
+      let mut cursor = Cursor::new(Vec::new());
+
+      try!(cursor.write_u8(5));
+      try!(cursor.write_u8(1));
+      try!(cursor.write_u8(0));
+
+      try!(stream.write_all(cursor.get_ref()));
+    }
 
     // Receive server reply.
     let _ = try!(stream.read_u8());
@@ -628,24 +639,30 @@ fn create_socks5_tcp_stream(proxy_addr: SocketAddr, host: &str, port: u16) -> ::
     // TODO: do auth method stuff.
 
     // Send SOCKS request.
-    try!(stream.write_u8(5));
-    try!(stream.write_u8(1));
-    try!(stream.write_u8(0));
-    match addr {
-      SocketAddr::V4(v4) => {
-        try!(stream.write_u8(1));
-        try!(stream.write(&v4.ip().octets()));
-      }
-      SocketAddr::V6(v6) => {
-        try!(stream.write_u8(4));
-        let segments = &v6.ip().segments();
-        assert_eq!(8, segments.len());
-        for &segment in segments {
-          try!(stream.write_u16::<BigEndian>(segment));
+    {
+      let mut cursor = Cursor::new(Vec::new());
+
+      try!(cursor.write_u8(5));
+      try!(cursor.write_u8(1));
+      try!(cursor.write_u8(0));
+      match addr {
+        SocketAddr::V4(v4) => {
+          try!(cursor.write_u8(1));
+          try!(cursor.write(&v4.ip().octets()));
+        }
+        SocketAddr::V6(v6) => {
+          try!(cursor.write_u8(4));
+          let segments = &v6.ip().segments();
+          assert_eq!(8, segments.len());
+          for &segment in segments {
+            try!(cursor.write_u16::<BigEndian>(segment));
+          }
         }
       }
+      try!(cursor.write_u16::<BigEndian>(port));
+
+      try!(stream.write_all(cursor.get_ref()));
     }
-    try!(stream.write_u16::<BigEndian>(port));
 
     // Receive server reply.
     let _ = try!(stream.read_u8());
